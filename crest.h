@@ -7,6 +7,8 @@
 
 #define CREST_RANDOM_SLOGAN
 
+#define CREST_LOG_CONNECTIONS
+
 #define CREST_PORT 8080
 
 /**
@@ -77,8 +79,8 @@ static const char CrestCTNames[][25] = {"application/json", "text/html"};
  * slogans displayed below crest logo
  */
 static const char CrestSlogans[][27] = {
-    "Better than nothing.     ", "Could be worst, trust me.",
-    "Good enough to pass.     ", "Soemtimes works.         ",
+    "Better than nothing.     ", "Could be worse, trust me.",
+    "Good enough to pass.     ", "Sometimes works.         ",
     "Maybe memory safe.       ", "C stands for caution.    ",
     "                         "};
 #endif

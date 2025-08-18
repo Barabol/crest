@@ -518,6 +518,9 @@ int setHeaders(CrestRequest *req, const char *ctn, const char **ptr) {
 void *handle(void *arg) {
    Thread *t = (Thread *)arg;
    int client = t->client;
+#ifdef CREST_LOG_CONNECTIONS
+   logInfo(INFO, "connection from %s", t->ip);
+#endif
    char buf[CREST_MAX_REQUEST_LENGTH];
    recv(client, buf, CREST_MAX_REQUEST_LENGTH, 0);
    buf[CREST_MAX_REQUEST_LENGTH - 1] = 0;
