@@ -677,7 +677,9 @@ void crestStart(int argc, char **argv) {
    addRequest("PATCH", CREST_PATCH);
    /*-----------------*/
 
-   signal(SIGKILL | SIGTERM | SIGINT, exitHandler);
+   signal(SIGKILL, exitHandler);
+   signal(SIGINT, exitHandler);
+   signal(SIGTERM, exitHandler);
 
    socklen_t sockLen = 16;
    struct sockaddr_in cliAddr;
