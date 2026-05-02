@@ -52,6 +52,12 @@ TrieTree *requests = NULL;
 
 Thread threads[CREST_MAX_THREADS];
 
+unsigned cntLenHash = 0;
+
+unsigned cookieHash = 0;
+
+unsigned setCookieHash = 0;
+
 typedef enum {
    INFO = 0,
    MINOR = 1,
@@ -89,6 +95,205 @@ void logInfo(LogLevel level, const char *content, ...) {
 #ifndef CREST_USE_LOGGER_COLOR
    printf("\n");
 #endif
+}
+
+static inline unsigned murmur_32_scramble(unsigned k) {
+   k *= 0xcc9e2d51;
+   k = (k << 15) | (k >> 17);
+   k *= 0x1b873593;
+   return k;
+}
+
+unsigned murmur3_32(const char *key, size_t len) {
+   unsigned h = 6792341;
+   unsigned k;
+   for (size_t i = len >> 2; i; i--) {
+      memcpy(&k, key, sizeof(unsigned));
+      key += sizeof(unsigned);
+      h ^= murmur_32_scramble(k);
+      h = (h << 13) | (h >> 19);
+      h = h * 5 + 0xe6546b64;
+   }
+   k = 0;
+   for (size_t i = len & 3; i; i--) {
+      k <<= 8;
+      k |= key[i - 1];
+   }
+   h ^= murmur_32_scramble(k);
+   h ^= len;
+   h ^= h >> 16;
+   h *= 0x85ebca6b;
+   h ^= h >> 13;
+   h *= 0xc2b2ae35;
+   h ^= h >> 16;
+   return h;
+}
+
+Set *setCreate() {
+   Set *set = (Set *)malloc(sizeof(Set));
+   if (!set) {
+      logInfo(CRITICAL, "unable to allocate memory");
+      return NULL;
+   }
+   set->tree = NULL;
+   set->elements = 0;
+   return set;
+}
+#define newLeaf()                                                              \
+   leaf = (BTreeLeaf *)malloc(sizeof(BTreeLeaf));                              \
+   if (leaf == NULL) {                                                         \
+      logInfo(CRITICAL, "unable to allocate memory");                          \
+      return NULL;                                                             \
+   }                                                                           \
+   leaf->l = NULL;                                                             \
+   leaf->r = NULL;                                                             \
+   int len_ = strlen(key) + 1;                                                 \
+   leaf->key = hash;                                                           \
+   leaf->keyStr = (char *)malloc(sizeof(char) * len_);                         \
+   if (leaf->keyStr == NULL) {                                                 \
+      logInfo(CRITICAL, "unable to allocate memory");                          \
+      return NULL;                                                             \
+   }                                                                           \
+   int x;                                                                      \
+   for (x = 0; key[x]; x++)                                                    \
+      leaf->keyStr[x] = key[x];                                                \
+   leaf->keyStr[x] = 0;                                                        \
+   leaf->len = len_;                                                           \
+   len_ = strlen(value) + 1;                                                   \
+   leaf->len += len_;                                                          \
+   leaf->value = (char *)malloc(sizeof(char) * len_);                          \
+   if (leaf->value == NULL) {                                                  \
+      logInfo(CRITICAL, "unable to allocate memory");                          \
+      return NULL;                                                             \
+   }                                                                           \
+   for (x = 0; value[x]; x++)                                                  \
+      leaf->value[x] = value[x];                                               \
+   leaf->value[x] = 0;
+
+unsigned setAdd(Set *set, char *key, char *value) {
+   unsigned long len = strlen(key);
+   unsigned hash = murmur3_32(key, len);
+   BTreeLeaf *leaf = NULL;
+   if (set->tree == NULL) {
+      newLeaf();
+      set->tree = leaf;
+      set->elements++;
+      return hash;
+   }
+   BTreeLeaf *node = set->tree;
+   BTreeLeaf *prNode = NULL;
+   char lor = 0;
+   unsigned holder;
+   while (node) {
+      holder = node->key;
+      if (hash == holder)
+         return hash;
+      if (hash < holder) {
+         prNode = node;
+         lor = 0;
+         node = node->l;
+      } else {
+         prNode = node;
+         lor = 1;
+         node = node->r;
+      }
+   }
+   newLeaf();
+   if (lor)
+      prNode->r = leaf;
+   else
+      prNode->l = leaf;
+   set->elements++;
+   return hash;
+}
+
+const char *setGet(Set *set, unsigned key) {
+   if (set == NULL || set->tree == NULL)
+      return NULL;
+   BTreeLeaf *node = set->tree;
+   while (node) {
+      if (node->key == key)
+         return node->value;
+      if (node->key > key)
+         node = node->l;
+      else
+         node = node->r;
+   }
+   return NULL;
+}
+
+const char *setGetByName(Set *set, char *key) {
+   unsigned long len = strlen(key);
+   unsigned hash = murmur3_32(key, len);
+   if (set == NULL || set->tree == NULL) {
+      return NULL;
+   }
+   BTreeLeaf *node = set->tree;
+   while (node) {
+      if (node->key == hash)
+         return node->value;
+      if (node->key > hash)
+         node = node->l;
+      else
+         node = node->r;
+   }
+   return NULL;
+}
+
+BTreeLeaf *setGetLeaf(Set *set, unsigned key) {
+   if (set == NULL || set->tree == NULL)
+      return NULL;
+   BTreeLeaf *node = set->tree;
+   while (node) {
+      if (node->key == key)
+         return node;
+      if (node->key > key)
+         node = node->l;
+      else
+         node = node->r;
+   }
+   return NULL;
+}
+
+void freeLeafs(BTreeLeaf *leaf) {
+   if (leaf == NULL)
+      return;
+   freeLeafs(leaf->l);
+   freeLeafs(leaf->r);
+   free(leaf);
+}
+unsigned long LeafsLen(BTreeLeaf *leaf) {
+   if (leaf == NULL)
+      return 0;
+   return leaf->len + LeafsLen(leaf->l) + LeafsLen(leaf->r) + 3;
+}
+
+unsigned long setGetLen(Set *set) {
+   if (set == NULL) {
+      return 0;
+   }
+   return LeafsLen(set->tree);
+}
+
+void setFree(Set *set) {
+   if (set == NULL)
+      return;
+   freeLeafs(set->tree);
+   free(set);
+}
+
+void leafPush(BTreeLeaf *leaf, char *buf) {
+   if (leaf == NULL)
+      return;
+   sprintf(buf, "%s\n%s: %s", buf, leaf->keyStr, leaf->value);
+   leafPush(leaf->l, buf);
+   leafPush(leaf->r, buf);
+}
+
+void setPush(Set *set, char *buf) {
+   if (set == NULL || buf == NULL)
+      return;
+   leafPush(set->tree, buf);
 }
 
 void addRequest(const char *name, CrestRequestType type) {
@@ -140,47 +345,17 @@ void freeRequests(TrieTree *tree) {
    free(tree);
 }
 
-void addPathVar(CrestRequest *req, unsigned index, const char *name,
-                char *value, int length) {
+void addPathVar(CrestRequest *req, unsigned index, char *name, char *value,
+                int length) {
    if (index >= 3)
       return;
-   if (req->vars == NULL) {
-      req->vars = (CrestTree *)malloc(sizeof(CrestTree));
-      if (req->vars == NULL) {
-         logInfo(CRITICAL, "unable to allocate memory");
-         return;
-      }
-      for (int x = 0; x < 3; x++)
-         req->vars->value[x] = NULL;
-      for (int x = 0; x < 128; x++)
-         req->vars->children[x] = NULL;
-   }
-
-   CrestTree *tree = req->vars;
-   for (; *name != 0; name++) {
-      if (tree->children[*name] == NULL) {
-         tree->children[*name] = (CrestTree *)malloc(sizeof(CrestTree));
-         if (tree->children[*name] == NULL) {
-            logInfo(CRITICAL, "unable to allocate memory");
-            return;
-         }
-         for (int x = 0; x < 3; x++)
-            tree->children[*name]->value[x] = NULL;
-         for (int x = 0; x < 128; x++)
-            tree->children[*name]->children[x] = NULL;
-      }
-      tree = tree->children[*name];
-   }
-
-   if (tree->value[index] != NULL)
-      free(tree->value[index]);
-
-   tree->value[index] = (char *)malloc(sizeof(char) * (length + 1));
-   if (tree->value[index] == NULL) {
-      logInfo(CRITICAL, "unable to allocate memory");
+   if (!req || !name || !value)
       return;
-   }
-   sprintf(tree->value[index], "%s", value);
+   char valBuf[length + 1];
+   for (int x = 0; x < length; x++)
+      valBuf[x] = value[x];
+   valBuf[length] = 0;
+   setAdd(req->vars[index], name, valBuf);
 }
 
 int isNumeric(const char *buf) {
@@ -270,12 +445,17 @@ CrestResponse *(*pathGetFunc(CrestRequestType type, const char *path,
 }
 
 int sendResponse(int client, unsigned httpStatus, CrestContentType cType,
-                 const char *content) {
+                 const char *content, Set *headers) {
    time_t timer;
    time(&timer);
    struct tm *gmtTimer = gmtime(&timer);
    unsigned long contentLen = strlen(content);
    unsigned long len;
+   unsigned long headersLen = setGetLen(headers) + 1;
+
+   char headerBuf[headersLen];
+   headerBuf[0] = 0;
+   setPush(headers, headerBuf);
 
    char timeBuf[100];
    len = sprintf(timeBuf, "%s, %02d %s %d %02d:%02d:%02d GMT",
@@ -283,11 +463,12 @@ int sendResponse(int client, unsigned httpStatus, CrestContentType cType,
                  CrestMdayNames[gmtTimer->tm_mon], 1900 + gmtTimer->tm_year,
                  gmtTimer->tm_hour, gmtTimer->tm_min, gmtTimer->tm_sec);
 
-   char resBuf[100 + contentLen + len];
+   char resBuf[100 + contentLen + len + headersLen];
    len = sprintf(resBuf,
                  "HTTP/1.1 %d\nServer: Crest " CREST_VERSION "\nDate: %s"
-                 "\nContent-Length: %lu\nContent-Type: %s\n\n%s",
-                 httpStatus, timeBuf, contentLen, CrestCTNames[cType], content);
+                 "\nContent-Length: %lu\nContent-Type: %s%s\n\n%s",
+                 httpStatus, timeBuf, contentLen, CrestCTNames[cType],
+                 headerBuf, content);
 
    if (send(client, resBuf, len, 0) < 0) {
       return 1;
@@ -295,24 +476,17 @@ int sendResponse(int client, unsigned httpStatus, CrestContentType cType,
    close(client);
    return 0;
 }
-void freeCrestTree(CrestTree *tree) {
-   if (tree == NULL)
-      return;
-   for (int x = 0; x < 128; x++)
-      if (tree->children[x] != NULL)
-         freeCrestTree(tree->children[x]);
-   for (int x = 0; x < 3; x++)
-      if (tree->value[x] != NULL)
-         free(tree->value[x]);
-   free(tree);
-}
 void freeRequest(CrestRequest *req) {
    if (req == NULL)
       return;
-   freeCrestTree(req->vars);
+   for (int x = 0; x < 3; x++)
+      setFree(req->vars[x]);
    free(req);
 }
-void freeResponse(CrestResponse *res) { free(res); }
+void freeResponse(CrestResponse *res) {
+   setFree(res->headers);
+   free(res);
+}
 void freePath(PathTree *tree) {
    if (tree == NULL)
       return;
@@ -487,6 +661,7 @@ int setHeaders(CrestRequest *req, const char *ctn, const char **ptr) {
             if (valLen == 0)
                return 1;
             valBuf[valLen - 1] = 0;
+            // printf("%s: %s\n", nameBuf, valBuf);
             addPathVar(req, 0, nameBuf, valBuf, valLen);
             nameLen = 0;
             state = 0;
@@ -521,9 +696,9 @@ void *handle(void *arg) {
 #ifdef CREST_LOG_CONNECTIONS
    logInfo(INFO, "connection from %s", t->ip);
 #endif
-   char buf[CREST_MAX_REQUEST_LENGTH];
-   recv(client, buf, CREST_MAX_REQUEST_LENGTH, 0);
-   buf[CREST_MAX_REQUEST_LENGTH - 1] = 0;
+   char buf[CREST_INITIAL_REQUEST_LENGTH];
+   ssize_t s = recv(client, buf, CREST_INITIAL_REQUEST_LENGTH, 0);
+   buf[CREST_INITIAL_REQUEST_LENGTH - 1] = 0;
    char requestType = getRequest(buf);
    if (requestType == -1) {
       t->running = 0;
@@ -531,30 +706,40 @@ void *handle(void *arg) {
    }
 
    int pathIndex = 0;
-   for (pathIndex = 0; pathIndex < CREST_MAX_REQUEST_LENGTH; pathIndex++)
+   for (pathIndex = 0; pathIndex < CREST_INITIAL_REQUEST_LENGTH; pathIndex++)
       if (buf[pathIndex] == '/')
          break;
 
    CrestRequest *request = (CrestRequest *)malloc(sizeof(CrestRequest));
    if (request == NULL) {
       logInfo(CRITICAL, "unable to allocate memory");
-      sendResponse(client, 500, CREST_CONTENT_HTML, "internal server error");
+      sendResponse(client, 500, CREST_CONTENT_HTML, "internal server error",
+                   NULL);
       t->running = 0;
       return NULL;
    }
    request->clientSocket = client;
-   request->vars = NULL;
+   for (int x = 0; x < 3; x++) {
+      request->vars[x] = setCreate();
+      if (request->vars[x] == NULL) {
+         sendResponse(client, 500, CREST_CONTENT_HTML, "internal server error",
+                      NULL);
+         t->running = 0;
+         return NULL;
+      }
+   }
    request->content = NULL;
-   request->requestType = CREST_GET;
+   request->requestType = (CrestRequestType)requestType;
    request->ip = t->ip;
+   request->contentLen = 0;
    const char *ptr;
 
    CrestResponse *(*func)(CrestRequest *) = pathGetFunc(
        (CrestRequestType)requestType, buf + pathIndex, request, &ptr);
 
    if (func == NULL) {
-      sendResponse(client, CREST_RES_NOT_FOUND, CREST_CONTENT_HTML,
-                   "not found");
+      sendResponse(client, CREST_RES_NOT_FOUND, CREST_CONTENT_HTML, "not found",
+                   NULL);
       freeRequest(request);
       t->running = 0;
       return NULL;
@@ -563,30 +748,81 @@ void *handle(void *arg) {
    if (*ptr == '?') {
       ptr++;
       if (getQuery(request, ptr, &ptr)) {
-         sendResponse(client, 400, CREST_CONTENT_HTML, "bad request");
+         sendResponse(client, 400, CREST_CONTENT_HTML, "bad request", NULL);
          freeRequest(request);
          t->running = 0;
          return NULL;
       }
    }
    if (setHeaders(request, ptr, &ptr)) {
-      sendResponse(client, 400, CREST_CONTENT_HTML, "bad request");
+      sendResponse(client, 400, CREST_CONTENT_HTML, "bad request", NULL);
       freeRequest(request);
       t->running = 0;
       return NULL;
    }
+
+   request->contentLen = s - (ptr - buf);
    request->content = ptr;
+   size_t sTotal = s;
+
+   char *lptr = NULL;
+   int offset = ptr - buf;
+   const char *ctnVal = setGet(request->vars[0], cntLenHash);
+   long cLen = 0;
+   if (ctnVal)
+      cLen = atol(ctnVal);
+
+   if (s >= CREST_INITIAL_REQUEST_LENGTH) {
+      if (cLen == 0) {
+         sendResponse(client, 403, CREST_CONTENT_HTML, "invalid request", NULL);
+         freeRequest(request);
+         t->running = 0;
+         return NULL;
+      }
+      lptr = (char *)malloc(cLen);
+      if (!lptr) {
+         sendResponse(client, 500, CREST_CONTENT_HTML, "internal server error",
+                      NULL);
+         freeRequest(request);
+         logInfo(CRITICAL, "unable to allocate memory");
+         t->running = 0;
+         return NULL;
+      }
+      offset = ptr - buf;
+      for (int x = 0; x < s - offset; x++) {
+         lptr[0] = (char)ptr[x];
+      }
+      while (sTotal < cLen) {
+         size_t s2 = recv(client, lptr + sTotal, cLen - sTotal, 0);
+         if (s2 < 0) {
+            sendResponse(client, 500, CREST_CONTENT_HTML,
+                         "internal server error", NULL);
+            freeRequest(request);
+            logInfo(CRITICAL, "unable to read internal buffer");
+            t->running = 0;
+            return NULL;
+         }
+         sTotal += s2;
+      }
+      lptr[cLen - 1] = 0;
+      request->content = lptr;
+      request->contentLen = sTotal - offset;
+   }
 
    CrestResponse *response = func(request);
    if (response == NULL) {
-      sendResponse(client, 500, CREST_CONTENT_HTML, "internal server error");
+      sendResponse(client, 500, CREST_CONTENT_HTML, "internal server error",
+                   NULL);
       freeRequest(request);
       t->running = 0;
       return NULL;
    }
-   sendResponse(client, response->code, response->type, response->content);
+   sendResponse(client, response->code, response->type, response->content,
+                response->headers);
    freeRequest(request);
    freeResponse(response);
+   if (lptr)
+      free(lptr);
    t->running = 0;
    return NULL;
 }
@@ -681,6 +917,10 @@ void crestStart(int argc, char **argv) {
    signal(SIGINT, exitHandler);
    signal(SIGTERM, exitHandler);
 
+   cntLenHash = murmur3_32("Content-Length", strlen("Content-Length"));
+   setCookieHash = murmur3_32("Set-Cookie", strlen("Set-Cookie"));
+   cookieHash = murmur3_32("Cookie", strlen("Cookie"));
+
    socklen_t sockLen = 16;
    struct sockaddr_in cliAddr;
    cliAddr.sin_family = INADDR_ANY;
@@ -693,7 +933,7 @@ void crestStart(int argc, char **argv) {
       threads[x].running = 0;
       threads[x].client = 0;
       threads[x].id = x;
-      threads[x].thr = -1;
+      threads[x].thr = NULL;
    }
    char unhandled = 0;
 
@@ -835,6 +1075,11 @@ CrestResponse *crestGenResponse(unsigned code, const char *content) {
    }
    res->code = code;
    res->content = content;
+   res->headers = setCreate();
+   if (!res->headers) {
+      logInfo(CRITICAL, "unable to allocate memory");
+      return NULL;
+   }
    if (content == NULL) {
       res->content = "";
       res->type = CREST_CONTENT_HTML;
@@ -848,83 +1093,64 @@ CrestResponse *crestGenResponse(unsigned code, const char *content) {
 
 /* -- getters for path vars, querys and headers -- */
 
-const char *crestGetVar(CrestRequest *req, const char *name) {
-   if (name == NULL || req == NULL || req->vars == NULL)
+const char *crestGetVar(CrestRequest *req, char *name) {
+   // TODO: fix decimal/string handling
+   if (name == NULL || req == NULL)
       return "";
-   CrestTree *tree = req->vars;
-   for (; *name != 0; name++) {
-      if (tree->children[*name] == NULL)
-         return "";
-      tree = tree->children[*name];
-   }
-   if (tree->value[1] == NULL)
+   const char *ptr = setGetByName(req->vars[1], name);
+   if (!ptr)
       return "";
-   return tree->value[1];
-}
-const char *crestGetQuery(CrestRequest *req, const char *name) {
-   if (name == NULL || req == NULL || req->vars == NULL)
-      return "";
-   CrestTree *tree = req->vars;
-   for (; *name != 0; name++) {
-      if (tree->children[*name] == NULL)
-         return "";
-      tree = tree->children[*name];
-   }
-   if (tree->value[2] == NULL)
-      return "";
-   return tree->value[2];
-}
-const char *crestGetHeader(CrestRequest *req, const char *name) {
-   if (name == NULL || req == NULL || req->vars == NULL)
-      return "";
-   CrestTree *tree = req->vars;
-   for (; *name != 0; name++) {
-      if (tree->children[*name] == NULL)
-         return "";
-      tree = tree->children[*name];
-   }
-   if (tree->value[0] == NULL)
-      return "";
-   return tree->value[0];
-}
-const char *crestGetVarPtr(CrestRequest *req, const char *name) {
-   if (name == NULL || req == NULL || req->vars == NULL)
-      return NULL;
-   CrestTree *tree = req->vars;
-   for (; *name != 0; name++) {
-      if (tree->children[*name] == NULL)
-         return NULL;
-      tree = tree->children[*name];
-   }
-   if (tree->value[1] == NULL)
-      return NULL;
-   return tree->value[1];
-}
-const char *crestGetQueryPtr(CrestRequest *req, const char *name) {
-   if (name == NULL || req == NULL || req->vars == NULL)
-      return NULL;
-   CrestTree *tree = req->vars;
-   for (; *name != 0; name++) {
-      if (tree->children[*name] == NULL)
-         return NULL;
-      tree = tree->children[*name];
-   }
-   if (tree->value[2] == NULL)
-      return NULL;
-   return tree->value[2];
-}
-const char *crestGetHeaderPtr(CrestRequest *req, const char *name) {
-   if (name == NULL || req == NULL || req->vars == NULL)
-      return NULL;
-   CrestTree *tree = req->vars;
-   for (; *name != 0; name++) {
-      if (tree->children[*name] == NULL)
-         return NULL;
-      tree = tree->children[*name];
-   }
-   if (tree->value[0] == NULL)
-      return NULL;
-   return tree->value[0];
+   return ptr;
 }
 
+const char *crestGetQuery(CrestRequest *req, char *name) {
+   if (name == NULL || req == NULL)
+      return "";
+   const char *ptr = setGetByName(req->vars[2], name);
+   if (!ptr)
+      return "";
+   return ptr;
+}
+
+const char *crestGetHeader(CrestRequest *req, char *name) {
+   if (name == NULL || req == NULL)
+      return "";
+   const char *ptr = setGetByName(req->vars[0], name);
+   if (!ptr)
+      return "";
+   return ptr;
+}
+
+const char *crestGetVarPtr(CrestRequest *req, char *name) {
+   // TODO: fix decimal/string handling
+   if (name == NULL || req == NULL)
+      return NULL;
+   return setGetByName(req->vars[1], name);
+}
+
+const char *crestGetQueryPtr(CrestRequest *req, char *name) {
+   if (name == NULL || req == NULL)
+      return NULL;
+   return setGetByName(req->vars[2], name);
+}
+
+const char *crestGetHeaderPtr(CrestRequest *req, char *name) {
+   if (name == NULL || req == NULL)
+      return NULL;
+   return setGetByName(req->vars[0], name);
+}
+
+int crestSetHeader(CrestResponse *res, char *name, char *value) {
+   if (name == NULL || res == NULL || value == NULL) {
+      logInfo(MINOR, "unable to set header \"%s\" value", name);
+      return -1;
+   }
+   setAdd(res->headers, name, value);
+   return 0;
+}
+
+int crestSetCookie(CrestResponse *res, char *name, char *value) {
+   // TODO: make it work
+   return 0;
+}
 /* -- -- */

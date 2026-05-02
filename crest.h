@@ -21,9 +21,11 @@
 #define CREST_VERSION "0.1"
 
 /**
- * size of read buffer
+ * size of initial read buffer
+ *
+ * if request is longer than that buffer will be allocated on heap
  */
-#define CREST_MAX_REQUEST_LENGTH 8192
+#define CREST_INITIAL_REQUEST_LENGTH 8000
 
 /**
  * maximal name length for query varable
@@ -92,8 +94,9 @@ static const char CrestSlogans[][27] = {
  * enum of all possible response content types
  */
 typedef enum : unsigned {
-   CREST_CONTENT_JSON = 0, // application/json
-   CREST_CONTENT_HTML = 1, // text/html
+   CREST_CONTENT_JSON = 0,   // application/json
+   CREST_CONTENT_HTML = 1,   // text/html
+   CREST_CONTENT_X_FORM = 2, // X-Form
 } CrestContentType;
 
 /**
@@ -126,22 +129,29 @@ typedef enum : unsigned {
 } CrestResponseCode;
 
 /**
- * Struct: CrestTree
- * \-----------------
+ * Struct: BTreeLeaf
+ * \--------------------
  *
- * base structure for trie tree
+ * base structure for binary tree leaf
  */
-typedef struct __CrestTree__ {
-   struct __CrestTree__ *children[128];
-   /**
-    * 0 - headers
-    *
-    * 1 - path varables
-    *
-    * 2 - query varables
-    */
-   char *value[3];
-} CrestTree;
+typedef struct __btreenode__ {
+   struct __btreenode__ *l, *r;
+   unsigned key;
+   char *value;
+   char *keyStr;
+   int len;
+} BTreeLeaf;
+
+/**
+ * Struct: Set
+ * \--------------------
+ *
+ * base structure for set that holds headers, query vars and path vars
+ */
+typedef struct {
+   unsigned long elements;
+   BTreeLeaf *tree;
+} Set;
 
 /**
  * Struct: CrestResponse
@@ -153,6 +163,7 @@ typedef struct {
    const char *content;
    CrestContentType type;
    unsigned code;
+   Set *headers;
 } CrestResponse;
 
 /**
@@ -163,11 +174,20 @@ typedef struct {
  */
 typedef struct {
    const char *content;
+   long contentLen;
    int clientSocket;
    CrestRequestType requestType;
 
-   // holds path varables, headers and query varables
-   CrestTree *vars;
+   /**
+    * holds path varables, headers and query varables
+    *
+    * 0 - headers
+    *
+    * 1 - path varables
+    *
+    * 2 - query varables
+    */
+   Set *vars[3];
    const char *ip;
 } CrestRequest;
 
@@ -219,7 +239,7 @@ CrestResponse *crestGenResponse(unsigned code, const char *content);
  *
  * if does not exist returns empty string
  */
-const char *crestGetVar(CrestRequest *req, const char *name);
+const char *crestGetVar(CrestRequest *req, char *name);
 
 /**
  * Function: crestGetQuery
@@ -229,7 +249,7 @@ const char *crestGetVar(CrestRequest *req, const char *name);
  *
  * if does not exist returns empty string
  */
-const char *crestGetQuery(CrestRequest *req, const char *name);
+const char *crestGetQuery(CrestRequest *req, char *name);
 
 /**
  * Function: crestGetHeader
@@ -239,7 +259,7 @@ const char *crestGetQuery(CrestRequest *req, const char *name);
  *
  * if does not exist returns empty string
  */
-const char *crestGetHeader(CrestRequest *req, const char *name);
+const char *crestGetHeader(CrestRequest *req, char *name);
 
 /**
  * Function: crestGetVarPtr
@@ -249,7 +269,7 @@ const char *crestGetHeader(CrestRequest *req, const char *name);
  *
  * if does not exist returns NULL
  */
-const char *crestGetVarPtr(CrestRequest *req, const char *name);
+const char *crestGetVarPtr(CrestRequest *req, char *name);
 
 /**
  * Function: crestGetQueryPtr
@@ -259,7 +279,7 @@ const char *crestGetVarPtr(CrestRequest *req, const char *name);
  *
  * if does not exist returns NULL
  */
-const char *crestGetQueryPtr(CrestRequest *req, const char *name);
+const char *crestGetQueryPtr(CrestRequest *req, char *name);
 
 /**
  * Function: crestGetHeaderPtr
@@ -269,5 +289,26 @@ const char *crestGetQueryPtr(CrestRequest *req, const char *name);
  *
  * if does not exist returns NULL
  */
-const char *crestGetHeaderPtr(CrestRequest *req, const char *name);
+const char *crestGetHeaderPtr(CrestRequest *req, char *name);
+
+/**
+ * Function: crestSetHeader
+ * \------------------------
+ *
+ * sets header with provided name
+ *
+ * returns 0 if successful
+ */
+int crestSetHeader(CrestResponse *res, char *name, char *value);
+
+/**
+ * Function: crestSetCookie
+ * \------------------------
+ *
+ * sets cookie with provided name
+ *
+ * returns 0 if successful
+ */
+int crestSetCookie(CrestResponse *res, char *name, char *value);
+
 #endif
