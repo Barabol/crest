@@ -9,6 +9,10 @@
 
 #define CREST_LOG_CONNECTIONS
 
+#define CREST_THREAD_OVERLOAD_LOG
+
+#define CREST_WARN_ON_REUSE
+
 #define CREST_PORT 8080
 
 /**
@@ -18,7 +22,7 @@
 
 #define CREST_MAX_THREADS 4
 
-#define CREST_VERSION "0.1"
+#define CREST_VERSION "0.5.1 BETA"
 
 /**
  * size of initial read buffer
@@ -46,6 +50,16 @@
  * maximal length of header value
  */
 #define CREST_MAX_HEADER_VALUE_LEN 1024
+
+/**
+ * maximal length of header name
+ */
+#define CREST_MAX_COOKIE_NAME_LEN 256
+
+/**
+ * maximal length of header value
+ */
+#define CREST_MAX_COOKIE_VALUE_LEN 256
 
 /**
  * Array: CrestWdayNames
@@ -129,6 +143,16 @@ typedef enum : unsigned {
 } CrestResponseCode;
 
 /**
+ * Enum: CrestResponseFlags
+ * \------------------------
+ *
+ * response flags
+ */
+typedef enum : unsigned {
+   CREST_RES_F_FREE_RES_BODY = 1, // free response body after sending response
+} CrestResponseFlags;
+
+/**
  * Struct: BTreeLeaf
  * \--------------------
  *
@@ -164,6 +188,8 @@ typedef struct {
    CrestContentType type;
    unsigned code;
    Set *headers;
+   Set *cookies;
+   int flags;
 } CrestResponse;
 
 /**
@@ -186,10 +212,31 @@ typedef struct {
     * 1 - path varables
     *
     * 2 - query varables
+    *
+    * 3 - cookies (by default will be NULL)
     */
-   Set *vars[3];
+   Set *vars[4];
    const char *ip;
 } CrestRequest;
+
+/**
+ * Macro: crestSession
+ * \-------------------
+ *
+ * sets new session object if session is established else it returns session
+ * object for current session
+ *
+ */
+#define crestSession(SessionObject, req, res, setter)                          \
+   ({                                                                          \
+      SessionObject *crest_session = (SessionObject *)crestGetSession(req);    \
+      if (!crest_session) {                                                    \
+         crest_session = (SessionObject *)malloc(sizeof(SessionObj));          \
+         setter(crest_session);                                                \
+         crestSetSession(res, (void *)crest_session);                          \
+      }                                                                        \
+      crest_session;                                                           \
+   })
 
 /**
  * Function: crestStart
@@ -230,6 +277,14 @@ int crestAddHandler(CrestResponse *(*func)(CrestRequest *),
  * generates response structure
  */
 CrestResponse *crestGenResponse(unsigned code, const char *content);
+
+/**
+ * Function: crestGenResponseF
+ * \---------------------------
+ *
+ * generates response structure with flags
+ */
+CrestResponse *crestGenResponseF(unsigned code, const char *content, int flags);
 
 /**
  * Function: crestGetVar
@@ -310,5 +365,73 @@ int crestSetHeader(CrestResponse *res, char *name, char *value);
  * returns 0 if successful
  */
 int crestSetCookie(CrestResponse *res, char *name, char *value);
+
+/**
+ * Function: crestDropCookie
+ * \------------------------
+ *
+ * deletes cookie with provided name
+ *
+ * returns 0 if successful
+ */
+int crestDropCookie(CrestResponse *res, char *name);
+
+/**
+ * Function: crestGetCookie
+ * \-------------------------
+ *
+ * returns value of request cookie
+ *
+ * if it does not exists returns empty string
+ */
+const char *crestGetCookie(CrestRequest *req, char *name);
+
+/**
+ * Function: crestGetCookiePtr
+ * \-------------------------
+ *
+ * returns value of request cookie
+ *
+ * if it does not exists returns NULL
+ */
+const char *crestGetCookiePtr(CrestRequest *req, char *name);
+
+/**
+ * Function: crestGetSession
+ * \-------------------------
+ *
+ * returns void ptr to user defined session object
+ */
+void *crestGetSession(CrestRequest *req);
+
+/**
+ * Function: crestSetSession
+ * \-------------------------
+ *
+ * sets user defined session object
+ *
+ * returns sessionId
+ */
+int crestSetSession(CrestResponse *res, void *sessionObj);
+
+/**
+ * Function: crestSetSessionDropFunc
+ * \---------------------------------
+ *
+ * sets function for freeing memory of session object
+ *
+ * provided function must return 0 if on success and not 0 on error
+ *
+ * SHOULD be called only once in main before starting crest
+ */
+int crestSetSessionDropFunc(int (*func)(void *));
+
+/**
+ * Function: crestDropSession
+ * \-------------------------
+ *
+ * returns void ptr to user defined session object
+ */
+int crestDropSession(CrestRequest *req);
 
 #endif

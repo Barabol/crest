@@ -2,6 +2,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -27,6 +28,7 @@ typedef struct __PathTree__ {
    } pathVar;
 } PathTree;
 
+// TODO: maybe change to Set
 typedef struct __TrieTree__ {
    struct __TrieTree__ *children[128];
    char value;
@@ -57,6 +59,10 @@ unsigned cntLenHash = 0;
 unsigned cookieHash = 0;
 
 unsigned setCookieHash = 0;
+
+static Set *sessions = NULL;
+int (*sessionFreeFunc)(void *) = NULL;
+sem_t sessionSem;
 
 typedef enum {
    INFO = 0,
@@ -186,8 +192,19 @@ unsigned setAdd(Set *set, char *key, char *value) {
    unsigned holder;
    while (node) {
       holder = node->key;
-      if (hash == holder)
+      if (hash == holder) {
+         // printf("-> %s\n", node->value);
+         node->len -= strlen(node->value);
+         free(node->value);
+         int len_ = strlen(value);
+         node->len += len_;
+         node->value = (char *)malloc(sizeof(char) * (len_ + 1));
+         int x;
+         for (x = 0; value[x]; x++)
+            node->value[x] = value[x];
+         node->value[x] = 0;
          return hash;
+      }
       if (hash < holder) {
          prNode = node;
          lor = 0;
@@ -199,6 +216,63 @@ unsigned setAdd(Set *set, char *key, char *value) {
       }
    }
    newLeaf();
+   if (lor)
+      prNode->r = leaf;
+   else
+      prNode->l = leaf;
+   set->elements++;
+   return hash;
+}
+
+unsigned setAddSession(Set *set, unsigned hash, void *value) {
+   BTreeLeaf *leaf = NULL;
+   if (set->tree == NULL) {
+      leaf = (BTreeLeaf *)malloc(sizeof(BTreeLeaf));
+      if (leaf == ((void *)0)) {
+         logInfo(CRITICAL, "unable to allocate memory");
+         return 0;
+      }
+      leaf->l = NULL;
+      leaf->r = NULL;
+      leaf->key = hash;
+      leaf->keyStr = NULL;
+      leaf->value = (char *)value;
+      set->tree = leaf;
+      set->elements++;
+      return hash;
+   }
+   BTreeLeaf *node = set->tree;
+   BTreeLeaf *prNode = NULL;
+   char lor = 0;
+   unsigned holder;
+   while (node) {
+      holder = node->key;
+      if (hash == holder) {
+         if (sessionFreeFunc)
+            sessionFreeFunc(node->value);
+         node->value = (char *)value;
+         return hash;
+      }
+      if (hash < holder) {
+         prNode = node;
+         lor = 0;
+         node = node->l;
+      } else {
+         prNode = node;
+         lor = 1;
+         node = node->r;
+      }
+   }
+   leaf = (BTreeLeaf *)malloc(sizeof(BTreeLeaf));
+   if (leaf == ((void *)0)) {
+      logInfo(CRITICAL, "unable to allocate memory");
+      return 0;
+   }
+   leaf->l = NULL;
+   leaf->r = NULL;
+   leaf->key = hash;
+   leaf->keyStr = NULL;
+   leaf->value = (char *)value;
    if (lor)
       prNode->r = leaf;
    else
@@ -260,6 +334,10 @@ void freeLeafs(BTreeLeaf *leaf) {
       return;
    freeLeafs(leaf->l);
    freeLeafs(leaf->r);
+   if (leaf->value)
+      free(leaf->value);
+   if (leaf->keyStr)
+      free(leaf->keyStr);
    free(leaf);
 }
 unsigned long LeafsLen(BTreeLeaf *leaf) {
@@ -282,6 +360,28 @@ void setFree(Set *set) {
    free(set);
 }
 
+void freeLeafsSession(BTreeLeaf *leaf) {
+   if (leaf == NULL)
+      return;
+   freeLeafsSession(leaf->l);
+   freeLeafsSession(leaf->r);
+   if (leaf->value && sessionFreeFunc) {
+      if (sessionFreeFunc(leaf->value)) {
+         logInfo(CRITICAL, "unable to free session object");
+      } else {
+         leaf->value = NULL;
+      }
+   }
+   free(leaf);
+}
+
+void setFreeSession(Set *set) {
+   if (set == NULL)
+      return;
+   freeLeafsSession(set->tree);
+   free(set);
+}
+
 void leafPush(BTreeLeaf *leaf, char *buf) {
    if (leaf == NULL)
       return;
@@ -296,12 +396,12 @@ void setPush(Set *set, char *buf) {
    leafPush(set->tree, buf);
 }
 
-void addRequest(const char *name, CrestRequestType type) {
+int addRequest(const char *name, CrestRequestType type) {
    if (requests == NULL) {
       requests = (TrieTree *)malloc(sizeof(TrieTree));
       if (requests == NULL) {
          logInfo(CRITICAL, "unable to allocate memory");
-         return;
+         return 1;
       }
       for (int x = 0; x < 128; x++)
          requests->children[x] = NULL;
@@ -313,7 +413,7 @@ void addRequest(const char *name, CrestRequestType type) {
          tree->children[*name] = (TrieTree *)malloc(sizeof(TrieTree));
          if (tree->children[*name] == NULL) {
             logInfo(CRITICAL, "unable to allocate memory");
-            return;
+            return 1;
          }
          for (int x = 0; x < 128; x++)
             tree->children[*name]->children[x] = NULL;
@@ -322,6 +422,7 @@ void addRequest(const char *name, CrestRequestType type) {
       tree = tree->children[*name];
    }
    tree->value = type;
+   return 0;
 }
 
 char getRequest(const char *name) {
@@ -444,8 +545,22 @@ CrestResponse *(*pathGetFunc(CrestRequestType type, const char *path,
    return tree->func[type];
 }
 
+long cookiesLen(BTreeLeaf *leaf) {
+   if (leaf == NULL)
+      return 0;
+   return leaf->len + 20 + cookiesLen(leaf->r) + cookiesLen(leaf->l);
+}
+
+void pushCookies(BTreeLeaf *leaf, char *buf) {
+   if (leaf == NULL)
+      return;
+   sprintf(buf, "%s\nSet-Cookie: %s=%s", buf, leaf->keyStr, leaf->value);
+   pushCookies(leaf->l, buf);
+   pushCookies(leaf->r, buf);
+}
+
 int sendResponse(int client, unsigned httpStatus, CrestContentType cType,
-                 const char *content, Set *headers) {
+                 const char *content, Set *headers, Set *cookies) {
    time_t timer;
    time(&timer);
    struct tm *gmtTimer = gmtime(&timer);
@@ -457,34 +572,47 @@ int sendResponse(int client, unsigned httpStatus, CrestContentType cType,
    headerBuf[0] = 0;
    setPush(headers, headerBuf);
 
+   long cookiesSize = 1;
+   if (cookies != NULL)
+      cookiesSize = cookiesLen(cookies->tree) + 1;
+
+   char cookieBuf[cookiesSize];
+   cookieBuf[0] = 0;
+   if (cookies != NULL)
+      pushCookies(cookies->tree, cookieBuf);
+
    char timeBuf[100];
    len = sprintf(timeBuf, "%s, %02d %s %d %02d:%02d:%02d GMT",
                  CrestWdayNames[gmtTimer->tm_wday], gmtTimer->tm_mday,
                  CrestMdayNames[gmtTimer->tm_mon], 1900 + gmtTimer->tm_year,
                  gmtTimer->tm_hour, gmtTimer->tm_min, gmtTimer->tm_sec);
 
-   char resBuf[100 + contentLen + len + headersLen];
+   char *resBuf =
+       (char *)malloc(100 + contentLen + len + headersLen + cookiesSize);
    len = sprintf(resBuf,
                  "HTTP/1.1 %d\nServer: Crest " CREST_VERSION "\nDate: %s"
-                 "\nContent-Length: %lu\nContent-Type: %s%s\n\n%s",
+                 "\nContent-Length: %lu\nContent-Type: %s%s%s\n\n%s",
                  httpStatus, timeBuf, contentLen, CrestCTNames[cType],
-                 headerBuf, content);
-
+                 headerBuf, cookieBuf, content);
+   // printf("buff size: %ld ( %ld )\n",
+   //     100 + contentLen + len + headersLen + cookiesSize, strlen(resBuf));
    if (send(client, resBuf, len, 0) < 0) {
       return 1;
    }
+   free(resBuf);
    close(client);
    return 0;
 }
 void freeRequest(CrestRequest *req) {
    if (req == NULL)
       return;
-   for (int x = 0; x < 3; x++)
+   for (int x = 0; x < 4; x++)
       setFree(req->vars[x]);
    free(req);
 }
 void freeResponse(CrestResponse *res) {
    setFree(res->headers);
+   setFree(res->cookies);
    free(res);
 }
 void freePath(PathTree *tree) {
@@ -714,7 +842,7 @@ void *handle(void *arg) {
    if (request == NULL) {
       logInfo(CRITICAL, "unable to allocate memory");
       sendResponse(client, 500, CREST_CONTENT_HTML, "internal server error",
-                   NULL);
+                   NULL, NULL);
       t->running = 0;
       return NULL;
    }
@@ -723,11 +851,12 @@ void *handle(void *arg) {
       request->vars[x] = setCreate();
       if (request->vars[x] == NULL) {
          sendResponse(client, 500, CREST_CONTENT_HTML, "internal server error",
-                      NULL);
+                      NULL, NULL);
          t->running = 0;
          return NULL;
       }
    }
+   request->vars[3] = NULL;
    request->content = NULL;
    request->requestType = (CrestRequestType)requestType;
    request->ip = t->ip;
@@ -739,7 +868,7 @@ void *handle(void *arg) {
 
    if (func == NULL) {
       sendResponse(client, CREST_RES_NOT_FOUND, CREST_CONTENT_HTML, "not found",
-                   NULL);
+                   NULL, NULL);
       freeRequest(request);
       t->running = 0;
       return NULL;
@@ -748,14 +877,15 @@ void *handle(void *arg) {
    if (*ptr == '?') {
       ptr++;
       if (getQuery(request, ptr, &ptr)) {
-         sendResponse(client, 400, CREST_CONTENT_HTML, "bad request", NULL);
+         sendResponse(client, 400, CREST_CONTENT_HTML, "bad request", NULL,
+                      NULL);
          freeRequest(request);
          t->running = 0;
          return NULL;
       }
    }
    if (setHeaders(request, ptr, &ptr)) {
-      sendResponse(client, 400, CREST_CONTENT_HTML, "bad request", NULL);
+      sendResponse(client, 400, CREST_CONTENT_HTML, "bad request", NULL, NULL);
       freeRequest(request);
       t->running = 0;
       return NULL;
@@ -774,7 +904,8 @@ void *handle(void *arg) {
 
    if (s >= CREST_INITIAL_REQUEST_LENGTH) {
       if (cLen == 0) {
-         sendResponse(client, 403, CREST_CONTENT_HTML, "invalid request", NULL);
+         sendResponse(client, 403, CREST_CONTENT_HTML, "invalid request", NULL,
+                      NULL);
          freeRequest(request);
          t->running = 0;
          return NULL;
@@ -782,7 +913,7 @@ void *handle(void *arg) {
       lptr = (char *)malloc(cLen);
       if (!lptr) {
          sendResponse(client, 500, CREST_CONTENT_HTML, "internal server error",
-                      NULL);
+                      NULL, NULL);
          freeRequest(request);
          logInfo(CRITICAL, "unable to allocate memory");
          t->running = 0;
@@ -796,7 +927,7 @@ void *handle(void *arg) {
          size_t s2 = recv(client, lptr + sTotal, cLen - sTotal, 0);
          if (s2 < 0) {
             sendResponse(client, 500, CREST_CONTENT_HTML,
-                         "internal server error", NULL);
+                         "internal server error", NULL, NULL);
             freeRequest(request);
             logInfo(CRITICAL, "unable to read internal buffer");
             t->running = 0;
@@ -812,13 +943,13 @@ void *handle(void *arg) {
    CrestResponse *response = func(request);
    if (response == NULL) {
       sendResponse(client, 500, CREST_CONTENT_HTML, "internal server error",
-                   NULL);
+                   NULL, NULL);
       freeRequest(request);
       t->running = 0;
       return NULL;
    }
    sendResponse(client, response->code, response->type, response->content,
-                response->headers);
+                response->headers, response->cookies);
    freeRequest(request);
    freeResponse(response);
    if (lptr)
@@ -837,6 +968,8 @@ void exitHandler(int sig) {
    }
    freePath(pathTree);
    freeRequests(requests);
+   setFreeSession(sessions);
+   sem_destroy(&sessionSem);
    exit(0);
 }
 
@@ -860,11 +993,8 @@ void crestStart(int argc, char **argv) {
         "    \\##  \\######  \\##          \\##   \\## \\########  \\######    "
         " \\##   \033[0m\n" COLORS);
 #ifdef CREST_RANDOM_SLOGAN
-   srand(time(NULL));
-
-   printf(
-       "   %s",
-       CrestSlogans[random() % ((sizeof(CrestSlogans)) / (sizeof(char) * 27))]);
+   printf("   %s", CrestSlogans[arc4random_uniform((sizeof(CrestSlogans)) /
+                                                   (sizeof(char) * 27))]);
    puts("                              (ver. " CREST_VERSION ")\033[0m\n");
 #endif
 #ifndef CREST_RANDOM_SLOGAN
@@ -900,18 +1030,34 @@ void crestStart(int argc, char **argv) {
       logInfo(CRITICAL, "unable start listener; exiting");
       return;
    }
+   sem_init(&sessionSem, 0, 1);
+
+   int retVal = 0;
 
    /*--WALL-OF-SHAME--*/
-   addRequest("GET", CREST_GET);
-   addRequest("HEAD", CREST_HEAD);
-   addRequest("PUT", CREST_PUT);
-   addRequest("POST", CREST_POST);
-   addRequest("DELETE", CREST_DELETE);
-   addRequest("OPTIONS", CREST_OPTIONS);
-   addRequest("TRACE", CREST_TRACE);
-   addRequest("CONNECT", CREST_CONNECT);
-   addRequest("PATCH", CREST_PATCH);
+   retVal |= addRequest("GET", CREST_GET);
+   retVal |= addRequest("HEAD", CREST_HEAD);
+   retVal |= addRequest("PUT", CREST_PUT);
+   retVal |= addRequest("POST", CREST_POST);
+   retVal |= addRequest("DELETE", CREST_DELETE);
+   retVal |= addRequest("OPTIONS", CREST_OPTIONS);
+   retVal |= addRequest("TRACE", CREST_TRACE);
+   retVal |= addRequest("CONNECT", CREST_CONNECT);
+   retVal |= addRequest("PATCH", CREST_PATCH);
    /*-----------------*/
+
+   if (retVal) {
+      logInfo(CRITICAL,
+              "Due to memory allocation problems unable to start; exiting");
+      return;
+   }
+
+   sessions = setCreate();
+   if (sessions == NULL) {
+      logInfo(CRITICAL,
+              "Due to memory allocation problems unable to start; exiting");
+      return;
+   }
 
    signal(SIGKILL, exitHandler);
    signal(SIGINT, exitHandler);
@@ -956,14 +1102,19 @@ void crestStart(int argc, char **argv) {
                break;
             }
          }
+
+#ifdef CREST_THREAD_OVERLOAD_LOG
          if (unhandled == 1) {
             logInfo(MINOR, "all threads are busy");
             unhandled = 2;
          }
+#endif
       }
    }
    freePath(pathTree);
    freeRequests(requests);
+   setFreeSession(sessions);
+   sem_destroy(&sessionSem);
 }
 
 int crestAddHandler(CrestResponse *(*func)(CrestRequest *),
@@ -1067,7 +1218,8 @@ int crestAddHandler(CrestResponse *(*func)(CrestRequest *),
    return 0;
 }
 
-CrestResponse *crestGenResponse(unsigned code, const char *content) {
+CrestResponse *crestGenResponseF(unsigned code, const char *content,
+                                 int flags) {
    CrestResponse *res = (CrestResponse *)malloc(sizeof(CrestResponse));
    if (res == NULL) {
       logInfo(CRITICAL, "unable to allocate memory");
@@ -1075,8 +1227,14 @@ CrestResponse *crestGenResponse(unsigned code, const char *content) {
    }
    res->code = code;
    res->content = content;
+   res->flags = flags;
    res->headers = setCreate();
    if (!res->headers) {
+      logInfo(CRITICAL, "unable to allocate memory");
+      return NULL;
+   }
+   res->cookies = setCreate();
+   if (!res->cookies) {
       logInfo(CRITICAL, "unable to allocate memory");
       return NULL;
    }
@@ -1089,6 +1247,10 @@ CrestResponse *crestGenResponse(unsigned code, const char *content) {
       res->type = CREST_CONTENT_HTML;
 
    return res;
+}
+
+CrestResponse *crestGenResponse(unsigned code, const char *content) {
+   return crestGenResponseF(code, content, 0);
 }
 
 /* -- getters for path vars, querys and headers -- */
@@ -1150,7 +1312,148 @@ int crestSetHeader(CrestResponse *res, char *name, char *value) {
 }
 
 int crestSetCookie(CrestResponse *res, char *name, char *value) {
-   // TODO: make it work
+   if (name == NULL || res == NULL || value == NULL) {
+      logInfo(MINOR, "unable to set cookie \"%s\" value", name);
+      return -1;
+   }
+   setAdd(res->cookies, name, value);
    return 0;
+}
+
+int crestDropCookie(CrestResponse *res, char *name) {
+   if (name == NULL || res == NULL) {
+      logInfo(MINOR, "unable to drop cookie\"%s\" value", name);
+      return -1;
+   }
+   setAdd(res->cookies, name, "");
+   return 0;
+}
+
+const char *crestGetCookiePtr(CrestRequest *req, char *name) {
+   if (req->vars[3] == NULL) {
+      req->vars[3] = setCreate();
+      if (req->vars[3] == NULL) {
+         logInfo(MINOR, "unable to get cookie\"%s\" value", name);
+         return NULL;
+      }
+      BTreeLeaf *leaf = setGetLeaf(req->vars[0], cookieHash);
+      if (leaf == NULL)
+         return NULL;
+
+      const char *val = leaf->value;
+      if (val == NULL)
+         return NULL;
+
+      char nameBuf[CREST_MAX_COOKIE_NAME_LEN];
+      char valBuf[CREST_MAX_COOKIE_VALUE_LEN];
+      int ctn;
+      int nameLen = 0;
+      int valLen = 0;
+      char holder;
+      char state = 0;
+
+      for (ctn = 0;; ctn++) {
+         holder = val[ctn];
+         if (!holder)
+            break;
+         if (!state) { // name
+            if (holder == ' ')
+               continue;
+            if (holder == '=') {
+               state = 1;
+               valLen = 0;
+               continue;
+            }
+            nameBuf[nameLen] = holder;
+            nameLen++;
+            if (nameLen >= CREST_MAX_COOKIE_NAME_LEN) {
+               logInfo(MINOR,
+                       "unable to get cookie value due to bad request body",
+                       name);
+               return NULL;
+            }
+         } else { // value
+            if (holder == ';') {
+               if (nameLen == 0) {
+                  logInfo(MINOR,
+                          "unable to get cookie value due to bad request body",
+                          name);
+                  return NULL;
+               }
+               nameBuf[nameLen] = 0;
+               valBuf[valLen] = 0;
+               setAdd(req->vars[3], nameBuf, valBuf);
+               // printf("\"%s\" = \"%s\"\n", nameBuf, valBuf);
+               state = 0;
+               nameLen = 0;
+               continue;
+            }
+            valBuf[valLen] = holder;
+            valLen++;
+            if (valLen >= CREST_MAX_COOKIE_VALUE_LEN) {
+               logInfo(MINOR,
+                       "unable to get cookie value due to bad request body",
+                       name);
+               return NULL;
+            }
+         }
+      }
+      if (valLen != 0) {
+         if (nameLen == 0) {
+            logInfo(MINOR, "unable to get cookie value due to bad request body",
+                    name);
+            return NULL;
+         }
+         nameBuf[nameLen] = 0;
+         valBuf[valLen] = 0;
+         // printf("%s = %s\n", nameBuf, valBuf);
+         setAdd(req->vars[3], nameBuf, valBuf);
+      }
+   }
+   return setGetByName(req->vars[3], name);
+}
+
+const char *crestGetCookie(CrestRequest *req, char *name) {
+   const char *ret = crestGetCookiePtr(req, name);
+   return ret ? ret : "";
+}
+
+void *crestGetSession(CrestRequest *req) {
+   unsigned sessionId = atol(crestGetCookie(req, "session"));
+   if (!sessionId)
+      return NULL;
+   void *obj = (void *)setGet(sessions, sessionId);
+   return obj;
+}
+
+int crestSetSession(CrestResponse *res, void *sessionObj) {
+   unsigned int sessionId;
+   arc4random_buf(&sessionId, sizeof(sessionId));
+   char valBuf[20];
+
+   sem_wait(&sessionSem);
+   setAddSession(sessions, sessionId, sessionObj);
+   sem_post(&sessionSem);
+
+   sprintf(valBuf, "%u", sessionId);
+   sessionId = setAdd(res->cookies, "session", valBuf);
+
+   return sessionId;
+}
+
+int crestDropSession(CrestRequest *req) {
+   logInfo(MINOR, "crestDropSession is not implemented");
+   return 1;
+}
+
+int crestSetSessionDropFunc(int (*func)(void *)) {
+#ifdef CREST_WARN_ON_REUSE
+   static char used = 0;
+   if (used)
+      logInfo(MINOR, "crestSessionDiscardFunc should be called only once");
+   else
+      used = 1;
+#endif
+   sessionFreeFunc = func;
 }
 /* -- -- */
